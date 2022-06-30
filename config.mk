@@ -1,5 +1,5 @@
 # dmenu version
-VERSION = 4.9
+VERSION = 5.0
 
 # paths
 PREFIX = /usr/local
@@ -29,3 +29,6 @@ LDFLAGS  = $(LIBS)
 
 # compiler and linker
 CC = cc
+CPPFLAGS+=
+CFLAGS+=-march=x86-64 -mtune=generic -O2 -pipe -fno-plt -fexceptions         -Wp,-D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security         -fstack-clash-protection -fcf-protection
+LDFLAGS+=-Wl,-O1,--sort-common,--as-needed,-z,relro,-z,now
