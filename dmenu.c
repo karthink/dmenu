@@ -717,6 +717,47 @@ readstdin(void)
 }
 
 static void
+readevent(void)
+{
+	XEvent ev;
+
+	while (XPending(dpy) && !XNextEvent(dpy, &ev)) {
+		if (XFilterEvent(&ev, win))
+			continue;
+		switch(ev.type) {
+		case DestroyNotify:
+			if (ev.xdestroywindow.window != win)
+				break;
+			cleanup();
+			exit(1);
+		case ButtonPress:
+			buttonpress(&ev);
+			break;
+		case Expose:
+			if (ev.xexpose.count == 0)
+				drw_map(drw, win, 0, 0, mw, mh);
+			break;
+		case FocusIn:
+			/* regrab focus from parent window */
+			if (ev.xfocus.window != win)
+				grabfocus();
+			break;
+		case KeyPress:
+			keypress(&ev.xkey);
+			break;
+		case SelectionNotify:
+			if (ev.xselection.property == utf8)
+				paste();
+			break;
+		case VisibilityNotify:
+			if (ev.xvisibility.state != VisibilityUnobscured)
+				XRaiseWindow(dpy, win);
+			break;
+		}
+	}
+}
+
+static void
 run(void)
 {
 	fd_set fds;
@@ -870,46 +911,6 @@ setup(void)
 	drawmenu();
 }
 
-static void
-readevent(void)
-{
-	XEvent ev;
-
-	while (XPending(dpy) && !XNextEvent(dpy, &ev)) {
-		if (XFilterEvent(&ev, win))
-			continue;
-		switch(ev.type) {
-		case DestroyNotify:
-			if (ev.xdestroywindow.window != win)
-				break;
-			cleanup();
-			exit(1);
-		case ButtonPress:
-			buttonpress(&ev);
-			break;
-		case Expose:
-			if (ev.xexpose.count == 0)
-				drw_map(drw, win, 0, 0, mw, mh);
-			break;
-		case FocusIn:
-			/* regrab focus from parent window */
-			if (ev.xfocus.window != win)
-				grabfocus();
-			break;
-		case KeyPress:
-			keypress(&ev.xkey);
-			break;
-		case SelectionNotify:
-			if (ev.xselection.property == utf8)
-				paste();
-			break;
-		case VisibilityNotify:
-			if (ev.xvisibility.state != VisibilityUnobscured)
-				XRaiseWindow(dpy, win);
-			break;
-		}
-	}
-}
 static void
 usage(void)
 {
