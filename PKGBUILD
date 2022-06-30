@@ -30,7 +30,7 @@ depends=('coreutils'
          'sh')
 conflicts=("$_pkgname" "$_pkgname-xft")
 provides=("$_pkgname" "$_pkgname-xft")
-source=("${_pkgname}::git+https://github.com/karthink/dmenu.git#branch=extras")
+source=("${_pkgname}::git+https://github.com/karthink/dmenu.git#branch=nonblocking")
 md5sums=('SKIP')
 sha1sums=('SKIP')
 
