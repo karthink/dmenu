@@ -15,6 +15,7 @@
 #include <X11/extensions/Xinerama.h>
 #endif
 #include <X11/Xft/Xft.h>
+#include <X11/Xresource.h>
 
 #include "drw.h"
 #include "util.h"
@@ -37,6 +38,9 @@ struct item {
 static char text[BUFSIZ] = "";
 static char *embed;
 static int bh, mw, mh;
+static int dmx = 0; /* put dmenu at this x offset */
+static int dmy = 0; /* put dmenu at this y offset (measured from the bottom if topbar is 0) */
+static unsigned int dmw = 0; /* make dmenu this wide */
 static int inputw = 0, promptw;
 static int lrpad; /* sum of left and right padding */
 static size_t cursor;
@@ -52,6 +56,10 @@ static XIC xic;
 
 static Drw *drw;
 static Clr *scheme[SchemeLast];
+
+/* Temporary arrays to allow overriding xresources values */
+static char *colortemp[4];
+static char *tempfonts;
 
 #include "config.h"
 
@@ -77,7 +85,7 @@ calcoffsets(void)
 	int i, n;
 
 	if (lines > 0)
-		n = lines * bh;
+		n = lines * columns * bh;
 	else
 		n = mw - (promptw + inputw + TEXTW("<") + TEXTW(">"));
 	/* calculate which items will begin the next page and previous page */
@@ -87,6 +95,15 @@ calcoffsets(void)
 	for (i = 0, prev = curr; prev && prev->left; prev = prev->left)
 		if ((i += (lines > 0) ? bh : MIN(TEXTW(prev->left->text), n)) > n)
 			break;
+}
+
+static int
+max_textw(void)
+{
+	int len = 0;
+	for (struct item *item = items; item && item->text; item++)
+		len = MAX(TEXTW(item->text), len);
+	return len;
 }
 
 static void
@@ -131,7 +148,7 @@ drawmenu(void)
 {
 	unsigned int curpos;
 	struct item *item;
-	int x = 0, y = 0, w;
+	int x = 0, y = 0, fh = drw->fonts->h, w;
 
 	drw_setscheme(drw, scheme[SchemeNorm]);
 	drw_rect(drw, 0, 0, mw, mh, 1, 1);
@@ -148,13 +165,19 @@ drawmenu(void)
 	curpos = TEXTW(text) - TEXTW(&text[cursor]);
 	if ((curpos += lrpad / 2 - 1) < w) {
 		drw_setscheme(drw, scheme[SchemeNorm]);
-		drw_rect(drw, x + curpos, 2, 2, bh - 4, 1, 0);
+		drw_rect(drw, x + curpos, 2 + (bh-fh)/2, 2, fh - 4, 1, 0);
 	}
 
 	if (lines > 0) {
-		/* draw vertical list */
-		for (item = curr; item != next; item = item->right)
-			drawitem(item, x, y += bh, mw - x);
+		/* draw grid */
+		int i = 0;
+		for (item = curr; item != next; item = item->right, i++)
+			drawitem(
+				item,
+				x + ((i / lines) *  ((mw - x) / columns)),
+				y + (((i % lines) + 1) * bh),
+				(mw - x) / columns
+			);
 	} else if (matches) {
 		/* draw horizontal list */
 		x += inputw;
@@ -501,6 +524,119 @@ draw:
 }
 
 static void
+buttonpress(XEvent *e)
+{
+	struct item *item;
+	XButtonPressedEvent *ev = &e->xbutton;
+	int x = 0, y = 0, h = bh, w;
+
+	if (ev->window != win)
+		return;
+
+	/* right-click: exit */
+	if (ev->button == Button3)
+		exit(1);
+
+	if (prompt && *prompt)
+		x += promptw;
+
+	/* input field */
+	w = (lines > 0 || !matches) ? mw - x : inputw;
+
+	/* left-click on input: clear input,
+	 * NOTE: if there is no left-arrow the space for < is reserved so
+	 *       add that to the input width */
+	if (ev->button == Button1 &&
+	   ((lines <= 0 && ev->x >= 0 && ev->x <= x + w +
+	   ((!prev || !curr->left) ? TEXTW("<") : 0)) ||
+	   (lines > 0 && ev->y >= y && ev->y <= y + h))) {
+		insert(NULL, -cursor);
+		drawmenu();
+		return;
+	}
+	/* middle-mouse click: paste selection */
+	if (ev->button == Button2) {
+		XConvertSelection(dpy, (ev->state & ShiftMask) ? clip : XA_PRIMARY,
+		                  utf8, utf8, win, CurrentTime);
+		drawmenu();
+		return;
+	}
+	/* scroll up */
+	if (ev->button == Button4 && prev) {
+		sel = curr = prev;
+		calcoffsets();
+		drawmenu();
+		return;
+	}
+	/* scroll down */
+	if (ev->button == Button5 && next) {
+		sel = curr = next;
+		calcoffsets();
+		drawmenu();
+		return;
+	}
+	if (ev->button != Button1)
+		return;
+	if (ev->state & ~ControlMask)
+		return;
+	if (lines > 0) {
+		/* vertical list: (ctrl)left-click on item */
+		w = mw - x;
+		for (item = curr; item != next; item = item->right) {
+			y += h;
+			if (ev->y >= y && ev->y <= (y + h)) {
+				puts(item->text);
+				if (!(ev->state & ControlMask))
+					exit(0);
+				sel = item;
+				if (sel) {
+					sel->out = 1;
+					drawmenu();
+				}
+				return;
+			}
+		}
+	} else if (matches) {
+		/* left-click on left arrow */
+		x += inputw;
+		w = TEXTW("<");
+		if (prev && curr->left) {
+			if (ev->x >= x && ev->x <= x + w) {
+				sel = curr = prev;
+				calcoffsets();
+				drawmenu();
+				return;
+			}
+		}
+		/* horizontal list: (ctrl)left-click on item */
+		for (item = curr; item != next; item = item->right) {
+			x += w;
+			w = MIN(TEXTW(item->text), mw - x - TEXTW(">"));
+			if (ev->x >= x && ev->x <= x + w) {
+				puts(item->text);
+				if (!(ev->state & ControlMask))
+					exit(0);
+				sel = item;
+				if (sel) {
+					sel->out = 1;
+					drawmenu();
+				}
+				return;
+			}
+		}
+		/* left-click on right arrow */
+		w = TEXTW(">");
+		x = mw - w;
+		if (next && ev->x >= x && ev->x <= x + w) {
+			sel = curr = next;
+			calcoffsets();
+			drawmenu();
+			return;
+		}
+	}
+}
+
+static void
 paste(void)
 {
 	char *p, *q;
@@ -561,6 +697,9 @@ run(void)
 				break;
 			cleanup();
 			exit(1);
+		case ButtonPress:
+			buttonpress(&ev);
+			break;
 		case Expose:
 			if (ev.xexpose.count == 0)
 				drw_map(drw, win, 0, 0, mw, mh);
@@ -601,16 +740,23 @@ setup(void)
 	int a, di, n, area = 0;
 #endif
 	/* init appearance */
-	for (j = 0; j < SchemeLast; j++)
-		scheme[j] = drw_scm_create(drw, colors[j], 2);
+	for (j = 0; j < SchemeLast; j++) {
+		scheme[j] = drw_scm_create(drw, (const char**)colors[j], 2);
+	}
+	for (j = 0; j < SchemeOut; ++j) {
+		for (i = 0; i < 2; ++i)
+			free(colors[j][i]);
+	}
 
 	clip = XInternAtom(dpy, "CLIPBOARD",   False);
 	utf8 = XInternAtom(dpy, "UTF8_STRING", False);
 
 	/* calculate menu geometry */
 	bh = drw->fonts->h + 2;
+	bh = MAX(bh,lineheight);	/* make a menu line AT LEAST 'lineheight' tall */
 	lines = MAX(lines, 0);
 	mh = (lines + 1) * bh;
+	promptw = (prompt && *prompt) ? TEXTW(prompt) - lrpad / 4 : 0;
 #ifdef XINERAMA
 	i = 0;
 	if (parentwin == root && (info = XineramaQueryScreens(dpy, &n))) {
@@ -637,9 +783,19 @@ setup(void)
 				if (INTERSECT(x, y, 1, 1, info[i]))
 					break;
 
-		x = info[i].x_org;
-		y = info[i].y_org + (topbar ? 0 : info[i].height - mh);
-		mw = info[i].width;
+		x = info[i].x_org + dmx;
+		y = info[i].y_org + (topbar ? dmy : info[i].height - mh - dmy);
+		mw = (dmw>0 ? dmw : info[i].width);
+		if (centered) {
+			mw = MIN(MAX(max_textw() + promptw, MAX(dmw, min_width)), info[i].width);
+			x = info[i].x_org + ((info[i].width  - mw) / 2);
+			y = info[i].y_org + ((info[i].height - mh) / 3);
+		} else {
+			x = info[i].x_org;
+			y = info[i].y_org + (topbar ? dmy : info[i].height - mh - dmy);
+			mw = (dmw>0 ? dmw : info[i].width);
+		}
+
 		XFree(info);
 	} else
 #endif
@@ -647,21 +803,33 @@ setup(void)
 		if (!XGetWindowAttributes(dpy, parentwin, &wa))
 			die("could not get embedding window attributes: 0x%lx",
 			    parentwin);
-		x = 0;
-		y = topbar ? 0 : wa.height - mh;
-		mw = wa.width;
+		x = dmx;
+		y = topbar ? dmy : wa.height - mh - dmy;
+		mw = (dmw>0 ? dmw : wa.width);
+
+		if (centered) {
+			mw = MIN(MAX(max_textw() + promptw, MAX(dmw, min_width)), wa.width);
+			x = (wa.width  - mw) / 2;
+			y = (wa.height - mh) / 3;
+		} else {
+			x = 0;
+			y = topbar ? 0 : wa.height - mh - dmy;
+			mw = mw = (dmw>0 ? dmw : wa.width);
+		}
 	}
-	promptw = (prompt && *prompt) ? TEXTW(prompt) - lrpad / 4 : 0;
 	inputw = MIN(inputw, mw/3);
 	match();
 
 	/* create menu window */
 	swa.override_redirect = True;
 	swa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
-	swa.event_mask = ExposureMask | KeyPressMask | VisibilityChangeMask;
-	win = XCreateWindow(dpy, parentwin, x, y, mw, mh, 0,
+	swa.event_mask = ExposureMask | KeyPressMask | VisibilityChangeMask |
+	                 ButtonPressMask;
+	win = XCreateWindow(dpy, parentwin, x, y - (topbar ? 0 : border_width * 2), mw - border_width * 2, mh, border_width,
 	                    CopyFromParent, CopyFromParent, CopyFromParent,
 	                    CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
+	if (border_width)
+		XSetWindowBorder(dpy, win, scheme[SchemeSel][ColBg].pixel);
 	XSetClassHint(dpy, win, &ch);
 
 
@@ -690,8 +858,44 @@ static void
 usage(void)
 {
 	fputs("usage: dmenu [-bfiv] [-l lines] [-p prompt] [-fn font] [-m monitor]\n"
+	      "             [-h height] [-x xoffset] [-y yoffset] [-w width]\n"
 	      "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n", stderr);
 	exit(1);
+}
+
+void
+readxresources(void) {
+	XrmInitialize();
+
+	char* xrm;
+	if ((xrm = XResourceManagerString(drw->dpy))) {
+		char *type;
+		XrmDatabase xdb = XrmGetStringDatabase(xrm);
+		XrmValue xval;
+
+		if (XrmGetResource(xdb, "dmenu.font", "*", &type, &xval))
+			fonts[0] = strdup(xval.addr);
+		else
+			fonts[0] = strdup(fonts[0]);
+		if (XrmGetResource(xdb, "dmenu.background", "*", &type, &xval))
+			colors[SchemeNorm][ColBg] = strdup(xval.addr);
+		else
+			colors[SchemeNorm][ColBg] = strdup(colors[SchemeNorm][ColBg]);
+		if (XrmGetResource(xdb, "dmenu.foreground", "*", &type, &xval))
+			colors[SchemeNorm][ColFg] = strdup(xval.addr);
+		else
+			colors[SchemeNorm][ColFg] = strdup(colors[SchemeNorm][ColFg]);
+		if (XrmGetResource(xdb, "dmenu.selbackground", "*", &type, &xval))
+			colors[SchemeSel][ColBg] = strdup(xval.addr);
+		else
+			colors[SchemeSel][ColBg] = strdup(colors[SchemeSel][ColBg]);
+		if (XrmGetResource(xdb, "dmenu.selforeground", "*", &type, &xval))
+			colors[SchemeSel][ColFg] = strdup(xval.addr);
+		else
+			colors[SchemeSel][ColFg] = strdup(colors[SchemeSel][ColFg]);
+
+		XrmDestroyDatabase(xdb);
+	}
 }
 
 int
@@ -709,30 +913,49 @@ main(int argc, char *argv[])
 			topbar = 0;
 		else if (!strcmp(argv[i], "-f"))   /* grabs keyboard before reading stdin */
 			fast = 1;
+		else if (!strcmp(argv[i], "-c"))   /* centers dmenu on screen */
+			centered = 1;
 		else if (!strcmp(argv[i], "-i")) { /* case-insensitive item matching */
 			fstrncmp = strncasecmp;
 			fstrstr = cistrstr;
 		} else if (i + 1 == argc)
 			usage();
 		/* these options take one argument */
-		else if (!strcmp(argv[i], "-l"))   /* number of lines in vertical list */
+		else if (!strcmp(argv[i], "-g")) {   /* number of columns in grid */
+			columns = atoi(argv[++i]);
+			if (lines == 0) lines = 1;
+		} else if (!strcmp(argv[i], "-l")) { /* number of lines in grid */
 			lines = atoi(argv[++i]);
+			if (columns == 0) columns = 1;
+		}
+		else if (!strcmp(argv[i], "-x"))   /* window x offset */
+			dmx = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "-y"))   /* window y offset (from bottom up if -b) */
+			dmy = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "-w"))   /* make dmenu this wide */
+			dmw = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "-m"))
 			mon = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "-p"))   /* adds prompt to left of input field */
 			prompt = argv[++i];
 		else if (!strcmp(argv[i], "-fn"))  /* font or font set */
-			fonts[0] = argv[++i];
+			tempfonts = argv[++i];
+		else if(!strcmp(argv[i], "-h")) { /* minimum height of one menu line */
+			lineheight = atoi(argv[++i]);
+			lineheight = MAX(lineheight,8); /* reasonable default in case of value too small/negative */
+		}
 		else if (!strcmp(argv[i], "-nb"))  /* normal background color */
-			colors[SchemeNorm][ColBg] = argv[++i];
+			colortemp[0] = argv[++i];
 		else if (!strcmp(argv[i], "-nf"))  /* normal foreground color */
-			colors[SchemeNorm][ColFg] = argv[++i];
+			colortemp[1] = argv[++i];
 		else if (!strcmp(argv[i], "-sb"))  /* selected background color */
-			colors[SchemeSel][ColBg] = argv[++i];
+			colortemp[2] = argv[++i];
 		else if (!strcmp(argv[i], "-sf"))  /* selected foreground color */
-			colors[SchemeSel][ColFg] = argv[++i];
+			colortemp[3] = argv[++i];
 		else if (!strcmp(argv[i], "-w"))   /* embedding window id */
 			embed = argv[++i];
+		else if (!strcmp(argv[i], "-bw"))
+			border_width = atoi(argv[++i]); /* border width */
 		else
 			usage();
 
@@ -748,8 +971,23 @@ main(int argc, char *argv[])
 		die("could not get embedding window attributes: 0x%lx",
 		    parentwin);
 	drw = drw_create(dpy, screen, root, wa.width, wa.height);
-	if (!drw_fontset_create(drw, fonts, LENGTH(fonts)))
+	readxresources();
+	/* Now we check whether to override xresources with commandline parameters */
+	if ( tempfonts )
+	   fonts[0] = strdup(tempfonts);
+	if ( colortemp[0])
+	   colors[SchemeNorm][ColBg] = strdup(colortemp[0]);
+	if ( colortemp[1])
+	   colors[SchemeNorm][ColFg] = strdup(colortemp[1]);
+	if ( colortemp[2])
+	   colors[SchemeSel][ColBg]  = strdup(colortemp[2]);
+	if ( colortemp[3])
+	   colors[SchemeSel][ColFg]  = strdup(colortemp[3]);
+
+	if (!drw_fontset_create(drw, (const char**)fonts, LENGTH(fonts)))
 		die("no fonts could be loaded.");
+
+	free(fonts[0]);
 	lrpad = drw->fonts->h;
 
 #ifdef __OpenBSD__
