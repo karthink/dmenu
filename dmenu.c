@@ -374,6 +374,7 @@ keypress(XKeyEvent *ev)
 		case XK_M: ksym = XK_Return; ev->state &= ~ControlMask; break;
 		case XK_n: ksym = XK_Down;      break;
 		case XK_p: ksym = XK_Up;        break;
+                case XK_v: ksym = XK_Next;      break;
 
 		case XK_k: /* delete right */
 			text[cursor] = '\0';
@@ -422,7 +423,9 @@ keypress(XKeyEvent *ev)
 		case XK_j: ksym = XK_Next;  break;
 		case XK_k: ksym = XK_Prior; break;
 		case XK_l: ksym = XK_Down;  break;
-		default:
+                case XK_v: ksym = XK_Prior;  break;
+		
+                default:
 			return;
 		}
 	}
