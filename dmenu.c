@@ -532,7 +532,10 @@ insert:
 		match();
 		break;
 	}
-
+        if (incremental) {
+          puts(text);
+          fflush(stdout);
+        }
 draw:
 	drawmenu();
 }
@@ -917,7 +920,7 @@ setup(void)
 static void
 usage(void)
 {
-	fputs("usage: dmenu [-biv] [-l lines] [-p prompt] [-fn font] [-m monitor]\n"
+	fputs("usage: dmenu [-bivr] [-l lines] [-p prompt] [-fn font] [-m monitor]\n"
 	      "             [-h height] [-x xoffset] [-y yoffset] [-w width]\n"
 	      "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n", stderr);
 	exit(1); 
@@ -975,7 +978,10 @@ main(int argc, char *argv[])
 		else if (!strcmp(argv[i], "-i")) { /* case-insensitive item matching */
 			fstrncmp = strncasecmp;
 			fstrstr = cistrstr;
-		} else if (i + 1 == argc)
+		}
+                else if (!strcmp(argv[i], "-r"))   /* incremental */
+                        incremental = 1;
+                else if (i + 1 == argc)
 			usage();
 		/* these options take one argument */
 		else if (!strcmp(argv[i], "-g")) {   /* number of columns in grid */
